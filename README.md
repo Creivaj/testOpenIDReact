@@ -1,4 +1,5 @@
-/** 
+
+/**
  * ALGORITMO PERSONALIZADO PARA LÍNEAS ORTOGONALES
  * 1. Identifica todos los conectores y sus puntos de anclaje
  * 2. Calcula rutas ortogonales evitando superposiciones
@@ -112,3 +113,6 @@ function isBetween(value, min, max) {
 
 // Ejecutar el algoritmo
 customOrthogonalRouting();
+
+
+
