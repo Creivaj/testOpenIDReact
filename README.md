@@ -1,11 +1,10 @@
 
+
 /**
- * ALGORITMO PERSONALIZADO PARA LÍNEAS ORTOGONALES
- * 1. Identifica todos los conectores y sus puntos de anclaje
- * 2. Calcula rutas ortogonales evitando superposiciones
- * 3. Aplica las nuevas rutas a los conectores
+ * ALGORITMO MEJORADO PARA LÍNEAS ORTOGONALES
+ * Trabaja directamente con los conectores del diagrama
  */
-function customOrthogonalRouting() {
+function enforceOrthogonalLines() {
     var repo = Repository;
     var diag = repo.GetCurrentDiagram();
     
@@ -14,94 +13,115 @@ function customOrthogonalRouting() {
         return;
     }
 
-    // Obtener todos los elementos y conectores del diagrama
-    var elements = {};
-    var connectors = [];
+    // Obtener todos los elementos del diagrama y sus posiciones
+    var elementPositions = {};
     var diagObjs = diag.DiagramObjects;
     
-    // Paso 1: Mapear elementos y sus posiciones
     for (var i = 0; i < diagObjs.Count; i++) {
         var dObj = diagObjs.GetAt(i);
-        var elem = repo.GetElementByID(dObj.ElementID);
-        
-        if (elem && elem.Type !== "Connector") {
-            elements[elem.ElementID] = {
-                x: dObj.left + (dObj.right - dObj.left)/2,
-                y: dObj.top + (dObj.bottom - dObj.top)/2,
-                width: dObj.right - dObj.left,
-                height: dObj.bottom - dObj.top
-            };
-        }
+        elementPositions[dObj.ElementID] = {
+            x: dObj.left + (dObj.right - dObj.left)/2,
+            y: dObj.top + (dObj.bottom - dObj.top)/2,
+            width: dObj.right - dObj.left,
+            height: dObj.bottom - dObj.top
+        };
     }
 
-    // Paso 2: Procesar conectores y calcular rutas
-    for (var j = 0; j < diagObjs.Count; j++) {
-        var dObj = diagObjs.GetAt(j);
-        var elem = repo.GetElementByID(dObj.ElementID);
+    // Obtener todos los conectores del diagrama
+    var connectors = diag.DiagramLinks;
+    var modifiedCount = 0;
+    
+    for (var j = 0; j < connectors.Count; j++) {
+        var connector = connectors.GetAt(j);
+        var sourceID = connector.ClientID;
+        var targetID = connector.SupplierID;
         
-        if (elem && elem.Type === "Connector") {
-            var conn = repo.GetConnectorByID(elem.ElementID);
-            var source = elements[conn.ClientID];
-            var target = elements[conn.SupplierID];
+        if (elementPositions[sourceID] && elementPositions[targetID]) {
+            var source = elementPositions[sourceID];
+            var target = elementPositions[targetID];
             
-            if (source && target) {
-                // Calcular ruta ortogonal personalizada
-                var newPath = calculateOrthogonalPath(source, target, elements);
-                
-                // Aplicar nueva ruta al conector
-                applyCustomPath(conn, newPath);
-                connectors.push(conn.ID);
-            }
+            // Calcular ruta ortogonal optimizada
+            var path = calculateOptimalOrthogonalPath(source, target, elementPositions);
+            
+            // Aplicar la ruta al conector
+            applyOrthogonalPath(connector, path);
+            modifiedCount++;
         }
     }
 
-    Session.Output("Proceso completado. Conectores modificados: " + connectors.length);
+    Session.Output("Proceso completado. Conectores modificados: " + modifiedCount);
     repo.ReloadDiagram(diag.DiagramID);
 }
 
 /**
- * Calcula ruta ortogonal evitando superposiciones
+ * Calcula la mejor ruta ortogonal evitando elementos
  */
-function calculateOrthogonalPath(source, target, elements) {
-    // Algoritmo de ruta ortogonal en 2 pasos (L-shaped)
-    var midX = source.x;
-    var midY = target.y;
+function calculateOptimalOrthogonalPath(source, target, elements) {
+    var padding = 15;
+    var midX, midY;
     
-    // Evitar colisión con otros elementos
-    var bboxPadding = 20;
-    
-    // Ajustar punto medio si hay colisión
-    for (var id in elements) {
-        var elem = elements[id];
-        if (isBetween(midX, elem.x - elem.width/2 - bboxPadding, elem.x + elem.width/2 + bboxPadding) &&
-            isBetween(midY, elem.y - elem.height/2 - bboxPadding, elem.y + elem.height/2 + bboxPadding)) {
-            // Desplazar punto medio
-            midX = elem.x + elem.width/2 + bboxPadding;
-        }
+    // Primera opción: ruta en L (horizontal luego vertical)
+    midX = source.x;
+    midY = target.y;
+    if (!pathCollides(midX, midY, elements, padding)) {
+        return [
+            { x: source.x, y: source.y },
+            { x: midX, y: source.y },
+            { x: midX, y: target.y },
+            { x: target.x, y: target.y }
+        ];
     }
     
+    // Segunda opción: ruta en L invertida (vertical luego horizontal)
+    midX = target.x;
+    midY = source.y;
+    if (!pathCollides(midX, midY, elements, padding)) {
+        return [
+            { x: source.x, y: source.y },
+            { x: source.x, y: midY },
+            { x: target.x, y: midY },
+            { x: target.x, y: target.y }
+        ];
+    }
+    
+    // Tercera opción: ruta en Z con punto de giro alternativo
+    midX = source.x + (target.x - source.x)/2;
+    midY = source.y + (target.y - source.y)/2;
     return [
-        { x: source.x, y: source.y },   // Punto origen
-        { x: midX, y: source.y },       // Primer segmento horizontal
-        { x: midX, y: target.y },       // Segmento vertical
-        { x: target.x, y: target.y }    // Segmento final horizontal
+        { x: source.x, y: source.y },
+        { x: midX, y: source.y },
+        { x: midX, y: target.y },
+        { x: target.x, y: target.y }
     ];
 }
 
 /**
- * Aplica una ruta personalizada a un conector
+ * Verifica si la ruta colisiona con algún elemento
  */
-function applyCustomPath(connector, pathPoints) {
-    var style = "LineStyle=3;RouteStyle=2;";  // Orthogonal
-    
-    // Construir cadena de puntos de ruta
+function pathCollides(midX, midY, elements, padding) {
+    for (var id in elements) {
+        var elem = elements[id];
+        if ((isBetween(midX, elem.x - elem.width/2 - padding, elem.x + elem.width/2 + padding) &&
+            (isBetween(midY, elem.y - elem.height/2 - padding, elem.y + elem.height/2 + padding))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Aplica una ruta ortogonal a un conector
+ */
+function applyOrthogonalPath(connector, path) {
+    var style = "LineStyle=3;RouteStyle=2;AvoidSelf=1;";
     var pathData = "";
-    for (var i = 0; i < pathPoints.length; i++) {
-        pathData += "@" + pathPoints[i].x + "," + pathPoints[i].y + ";";
+    
+    for (var i = 0; i < path.length; i++) {
+        pathData += "@" + Math.round(path[i].x) + "," + Math.round(path[i].y) + ";";
     }
     
-    // Aplicar estilo y ruta
-    connector.Style = "Mode=3;";  // Orthogonal
+    // Aplicar estilo ortogonal con ruta manual
+    connector.Style = "Mode=3;";
     connector.StyleEx = style + "ManualRoute=1;";
     connector.SetStyle("CustomPath", pathData);
     connector.Update();
@@ -111,8 +131,7 @@ function isBetween(value, min, max) {
     return value >= min && value <= max;
 }
 
-// Ejecutar el algoritmo
-customOrthogonalRouting();
-
+// Ejecutar el script
+enforceOrthogonalLines();
 
 
