@@ -1,4 +1,6 @@
 
+
+
 // Script para Enterprise Architect - Obtener relaciones con nombres y posiciones en diagrama
 function main() {
     // Obtener el diagrama actualmente seleccionado
@@ -20,41 +22,60 @@ function main() {
             "WHERE dl.DiagramID = " + diagram.DiagramID + " " +
             "ORDER BY c.Connector_ID, d.Object_ID";
         
-        var queryResult = Repository.SQLQuery(sqlQuery);
-        
-        // Procesar el resultado XML
-        var xmlDoc = new COMObject("MSXML2.DOMDocument.4.0");
-        xmlDoc.async = false;
-        xmlDoc.loadXML(queryResult);
-        
-        if (xmlDoc.parseError.errorCode != 0) {
-            Session.Output("Error al parsear XML: " + xmlDoc.parseError.reason);
-            return;
-        }
-        
+        // Ejecutar consulta SQL directamente
         var connectors = {};
-        var rows = xmlDoc.selectNodes("//Row");
+        var result = Repository.SQLQuery(sqlQuery);
         
-        // Organizar los datos por relación
-        for (var i = 0; i < rows.length; i++) {
-            var row = rows[i];
-            var connectorId = row.selectSingleNode("Connector_ID").text;
+        // Procesar el resultado como texto (alternativa al XML)
+        var lines = result.split("\n");
+        var headers = [];
+        var isData = false;
+        
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
             
-            if (!connectors[connectorId]) {
-                connectors[connectorId] = {
-                    name: row.selectSingleNode("RelationName").text,
-                    type: row.selectSingleNode("Connector_Type").text,
-                    elements: []
-                };
+            if (line.startsWith("<Row>")) {
+                isData = true;
+                var rowData = {};
+                continue;
             }
             
-            connectors[connectorId].elements.push({
-                id: row.selectSingleNode("Object_ID").text,
-                left: row.selectSingleNode("RectLeft").text,
-                right: row.selectSingleNode("RectRight").text,
-                top: row.selectSingleNode("RectTop").text,
-                bottom: row.selectSingleNode("RectBottom").text
-            });
+            if (line.startsWith("</Row>")) {
+                isData = false;
+                
+                // Procesar los datos de la fila
+                var connectorId = rowData["Connector_ID"];
+                
+                if (!connectors[connectorId]) {
+                    connectors[connectorId] = {
+                        name: rowData["RelationName"],
+                        type: rowData["Connector_Type"],
+                        elements: []
+                    };
+                }
+                
+                connectors[connectorId].elements.push({
+                    id: rowData["Object_ID"],
+                    left: rowData["RectLeft"],
+                    right: rowData["RectRight"],
+                    top: rowData["RectTop"],
+                    bottom: rowData["RectBottom"]
+                });
+                
+                continue;
+            }
+            
+            if (isData) {
+                var tagStart = line.indexOf("<") + 1;
+                var tagEnd = line.indexOf(">");
+                var tagName = line.substring(tagStart, tagEnd);
+                
+                var valueStart = tagEnd + 1;
+                var valueEnd = line.indexOf("</" + tagName + ">");
+                var value = line.substring(valueStart, valueEnd);
+                
+                rowData[tagName] = value;
+            }
         }
         
         // Mostrar los resultados
@@ -62,7 +83,7 @@ function main() {
             if (connectors.hasOwnProperty(connectorId)) {
                 var connector = connectors[connectorId];
                 Session.Output("Relación ID: " + connectorId);
-                Session.Output("Nombre: " + connector.name);
+                Session.Output("Nombre: " + (connector.name || "[sin nombre]"));
                 Session.Output("Tipo: " + connector.type);
                 
                 // Mostrar información de posición de los elementos conectados
@@ -84,6 +105,5 @@ function main() {
 }
 
 main();
-
 
 
