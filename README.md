@@ -1,177 +1,289 @@
-function adjustConnectorsToAvoidOverlap() {
-    // Get the current diagram
-    var diagram as EA.Diagram;
-    diagram = Repository.GetCurrentDiagram();
-    
-    if (diagram != null) {
-        // Get all diagram connectors
-        var diagramObjects as EA.Collection;
-        diagramObjects = diagram.DiagramObjects;
-        
-        // Create arrays to store connector information
-        var connectors = [];
-        var connectorElements = [];
-        
-        // Collect all connector information
-        for (var i = 0; i < diagramObjects.Count; i++) {
-            var diagramObject as EA.DiagramObject;
-            diagramObject = diagramObjects.GetAt(i);
-            
-            var element as EA.Element;
-            element = Repository.GetElementByID(diagramObject.ElementID);
-            
-            if (element != null && element.Type == "Connector") {
-                var connector as EA.Connector;
-                connector = Repository.GetConnectorByID(diagramObject.ElementID);
-                
-                if (connector != null) {
-                    connectors.push({
-                        id: connector.ConnectorID,
-                        diagramObject: diagramObject,
-                        points: getConnectorPoints(diagramObject),
-                        originalPoints: getConnectorPoints(diagramObject)
-                    });
-                    connectorElements.push(connector);
-                }
-            }
+function main() {
+    try {
+        // Get current diagram
+        var diagram = Repository.GetCurrentDiagram();
+        if (!diagram) {
+            Session.Output("Error: No diagram selected");
+            return;
         }
+
+        // Begin transaction
+        Repository.BeginTransaction();
         
-        // Process connectors to avoid overlaps
-        for (var i = 0; i < connectors.length; i++) {
-            for (var j = i + 1; j < connectors.length; j++) {
-                if (areConnectorsOverlapping(connectors[i], connectors[j])) {
-                    adjustConnectorPath(connectors[i], connectors[j]);
-                }
-            }
-        }
+        // Process all connectors in the diagram
+        var processedCount = optimizeConnectorRouting(diagram.DiagramID);
         
-        // Apply changes to the diagram
-        for (var i = 0; i < connectors.length; i++) {
-            var diagramObject = connectors[i].diagramObject;
-            var newPoints = connectors[i].points;
-            
-            // Update the connector geometry
-            diagramObject.Geometry = updateGeometryPoints(diagramObject.Geometry, newPoints);
-            diagramObject.Update();
-        }
+        // Commit changes
+        Repository.EndTransaction();
         
+        // Refresh diagram
         Repository.ReloadDiagram(diagram.DiagramID);
-        Session.Output("Connectors adjusted to avoid overlaps while allowing crossings");
+        
+        Session.Output("Successfully processed " + processedCount + " connectors");
+    } catch (e) {
+        Repository.RollbackTransaction();
+        Session.Output("Error: " + e.message);
     }
 }
 
-function getConnectorPoints(diagramObject) {
-    var points = [];
-    var geometry = diagramObject.Geometry;
+function optimizeConnectorRouting(diagramID) {
+    // Get all connectors in the diagram with their waypoints
+    var connectors = loadDiagramConnectors(diagramID);
     
-    // Parse the geometry string to extract points
-    // EA stores geometry in format: "LLX=...;LLY=...;URX=...;URY=...;"
-    // and points as: "PLT=...;PLB=...;PRT=...;PRB=...;"
-    // This is simplified - actual implementation needs proper parsing
-    var parts = geometry.split(';');
-    for (var i = 0; i < parts.length; i++) {
-        if (parts[i].startsWith("PLT") || parts[i].startsWith("PLB") || 
-            parts[i].startsWith("PRT") || parts[i].startsWith("PRB")) {
-            var coords = parts[i].substring(4).split(',');
-            points.push({
-                x: parseInt(coords[0]),
-                y: parseInt(coords[1])
-            });
-        }
-    }
+    // Analyze and optimize routing
+    var updatedConnectors = analyzeConnectorPaths(connectors);
     
-    return points;
+    // Apply changes to the database
+    return applyConnectorUpdates(updatedConnectors);
 }
 
-function areConnectorsOverlapping(conn1, conn2) {
-    // Check if two connectors are overlapping (not just crossing)
-    // This is a simplified implementation - you may need a more robust algorithm
+function loadDiagramConnectors(diagramID) {
+    var connectors = [];
     
-    // Get bounding boxes for each segment of the connectors
-    var segments1 = getConnectorSegments(conn1);
-    var segments2 = getConnectorSegments(conn2);
+    // Get all connectors visible in this diagram
+    var sql = `
+        SELECT c.Connector_ID, c.Connector_Type, 
+               c.Start_Object_ID, c.End_Object_ID
+        FROM t_diagramlinks dl
+        JOIN t_connector c ON dl.ConnectorID = c.Connector_ID
+        WHERE dl.DiagramID = ${diagramID}
+    `;
     
-    for (var i = 0; i < segments1.length; i++) {
-        for (var j = 0; j < segments2.length; j++) {
-            if (areSegmentsOverlapping(segments1[i], segments2[j])) {
-                return true;
-            }
-        }
-    }
+    var result = Repository.SQLQuery(sql);
+    var xmlDoc = parseXmlResult(result);
     
-    return false;
-}
-
-function getConnectorSegments(conn) {
-    var segments = [];
-    for (var i = 1; i < conn.points.length; i++) {
-        segments.push({
-            start: conn.points[i-1],
-            end: conn.points[i]
+    var nodes = xmlDoc.selectNodes("//Row");
+    for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        var connectorID = node.selectSingleNode("Connector_ID").text;
+        
+        connectors.push({
+            id: connectorID,
+            type: node.selectSingleNode("Connector_Type").text,
+            startID: node.selectSingleNode("Start_Object_ID").text,
+            endID: node.selectSingleNode("End_Object_ID").text,
+            waypoints: loadConnectorWaypoints(connectorID)
         });
     }
-    return segments;
+    
+    return connectors;
 }
 
-function areSegmentsOverlapping(seg1, seg2) {
-    // Check if two line segments are overlapping (not just intersecting)
-    // This is a simplified implementation
+function loadConnectorWaypoints(connectorID) {
+    var waypoints = [];
     
-    // Calculate distance between segments
-    // If distance is less than threshold (3 units), consider them overlapping
-    var minDistance = 3; // 3 positions of distance as requested
+    var sql = `
+        SELECT Sequence, XPosition, YPosition, Waypoint
+        FROM t_connectorwaypoint
+        WHERE ConnectorID = ${connectorID}
+        ORDER BY Sequence
+    `;
     
-    // Calculate distance between two segments (simplified)
-    // In a real implementation, you'd need proper geometry calculations
-    var dist1 = Math.sqrt(Math.pow(seg1.start.x - seg2.start.x, 2) + Math.pow(seg1.start.y - seg2.start.y, 2));
-    var dist2 = Math.sqrt(Math.pow(seg1.end.x - seg2.end.x, 2) + Math.pow(seg1.end.y - seg2.end.y, 2));
+    var result = Repository.SQLQuery(sql);
+    var xmlDoc = parseXmlResult(result);
     
-    return (dist1 < minDistance && dist2 < minDistance);
-}
-
-function adjustConnectorPath(conn1, conn2) {
-    // Adjust the path of conn1 to avoid overlapping with conn2
-    // while maintaining 3 units distance for parallel segments
-    
-    // This is a simplified approach - a real implementation would need:
-    // 1. Detect overlapping segments
-    // 2. Calculate new path with offset
-    // 3. Ensure new path doesn't create new overlaps
-    
-    // For demo purposes, we'll just add an offset to some points
-    for (var i = 0; i < conn1.points.length; i++) {
-        conn1.points[i].x += 10;
-        conn1.points[i].y += 10;
+    var nodes = xmlDoc.selectNodes("//Row");
+    for (var i = 0; i < nodes.length; i++) {
+        var node = nodes[i];
+        waypoints.push({
+            seq: parseInt(node.selectSingleNode("Sequence").text),
+            x: parseInt(node.selectSingleNode("XPosition").text),
+            y: parseInt(node.selectSingleNode("YPosition").text),
+            type: node.selectSingleNode("Waypoint").text
+        });
     }
+    
+    return waypoints;
 }
 
-function updateGeometryPoints(geometry, points) {
-    // Update the geometry string with new points
-    // This is simplified - actual implementation needs proper geometry string construction
+function analyzeConnectorPaths(connectors) {
+    // First pass: identify all straight segments
+    var allSegments = [];
     
-    var newGeometry = "";
-    var parts = geometry.split(';');
-    
-    // Rebuild geometry with updated points
-    // Note: This is placeholder logic - EA's geometry string format is complex
-    for (var i = 0; i < parts.length; i++) {
-        if (parts[i] == "") continue;
+    connectors.forEach(function(connector) {
+        connector.segments = [];
         
-        if (parts[i].startsWith("PLT") && points.length > 0) {
-            newGeometry += "PLT=" + points[0].x + "," + points[0].y + ";";
-        } else if (parts[i].startsWith("PLB") && points.length > 1) {
-            newGeometry += "PLB=" + points[1].x + "," + points[1].y + ";";
-        } else if (parts[i].startsWith("PRT") && points.length > 2) {
-            newGeometry += "PRT=" + points[2].x + "," + points[2].y + ";";
-        } else if (parts[i].startsWith("PRB") && points.length > 3) {
-            newGeometry += "PRB=" + points[3].x + "," + points[3].y + ";";
-        } else {
-            newGeometry += parts[i] + ";";
+        for (var i = 1; i < connector.waypoints.length; i++) {
+            var wp1 = connector.waypoints[i-1];
+            var wp2 = connector.waypoints[i];
+            
+            if (wp1.x === wp2.x || wp1.y === wp2.y) {
+                var segment = {
+                    connectorID: connector.id,
+                    index: i-1,
+                    start: wp1,
+                    end: wp2,
+                    isHorizontal: (wp1.y === wp2.y)
+                };
+                
+                connector.segments.push(segment);
+                allSegments.push(segment);
+            }
         }
-    }
+    });
     
-    return newGeometry;
+    // Second pass: detect and resolve overlaps
+    var updatedConnectors = [];
+    
+    connectors.forEach(function(connector) {
+        var modified = false;
+        var newWaypoints = connector.waypoints.slice(); // Clone array
+        
+        // Process each segment of this connector
+        for (var i = connector.segments.length - 1; i >= 0; i--) {
+            var segment = connector.segments[i];
+            var overlaps = findSegmentOverlaps(segment, allSegments);
+            
+            if (overlaps.length > 0) {
+                // Create alternative path for this segment
+                var alternative = createAlternativePath(segment, overlaps);
+                
+                // Replace the straight segment with the alternative path
+                newWaypoints.splice(segment.index + 1, 0, alternative);
+                modified = true;
+            }
+        }
+        
+        if (modified) {
+            // Re-sequence waypoints
+            newWaypoints.forEach(function(wp, idx) {
+                wp.seq = idx;
+            });
+            
+            updatedConnectors.push({
+                id: connector.id,
+                waypoints: newWaypoints
+            });
+        }
+    });
+    
+    return updatedConnectors;
 }
 
-// Run the function
-adjustConnectorsToAvoidOverlap();
+function findSegmentOverlaps(segment, allSegments) {
+    var overlaps = [];
+    var s1 = segment;
+    
+    allSegments.forEach(function(s2) {
+        // Don't compare with self or same connector
+        if (s1.connectorID === s2.connectorID) return;
+        
+        // Only compare parallel segments
+        if (s1.isHorizontal !== s2.isHorizontal) return;
+        
+        if (s1.isHorizontal) {
+            // Horizontal segments - check same Y and overlapping X
+            if (s1.start.y === s2.start.y && 
+                Math.max(s1.start.x, s1.end.x) >= Math.min(s2.start.x, s2.end.x) && 
+                Math.min(s1.start.x, s1.end.x) <= Math.max(s2.start.x, s2.end.x)) {
+                overlaps.push(s2);
+            }
+        } else {
+            // Vertical segments - check same X and overlapping Y
+            if (s1.start.x === s2.start.x && 
+                Math.max(s1.start.y, s1.end.y) >= Math.min(s2.start.y, s2.end.y) && 
+                Math.min(s1.start.y, s1.end.y) <= Math.max(s2.start.y, s2.end.y)) {
+                overlaps.push(s2);
+            }
+        }
+    });
+    
+    return overlaps;
+}
+
+function createAlternativePath(segment, overlaps) {
+    var start = segment.start;
+    var end = segment.end;
+    
+    if (segment.isHorizontal) {
+        // For horizontal segments, create a vertical offset
+        var midX = Math.round((start.x + end.x) / 2);
+        var offset = calculateOptimalOffset(overlaps, true);
+        
+        return {
+            x: midX,
+            y: start.y + offset,
+            seq: start.seq + 0.5,
+            type: "L" // Line-to point
+        };
+    } else {
+        // For vertical segments, create a horizontal offset
+        var midY = Math.round((start.y + end.y) / 2);
+        var offset = calculateOptimalOffset(overlaps, false);
+        
+        return {
+            x: start.x + offset,
+            y: midY,
+            seq: start.seq + 0.5,
+            type: "L" // Line-to point
+        };
+    }
+}
+
+function calculateOptimalOffset(overlaps, isHorizontal) {
+    // Simple algorithm: find the smallest offset that doesn't conflict
+    var baseOffset = 40; // Default offset in pixels
+    var directions = [1, -1, 2, -2]; // Try different directions and magnitudes
+    
+    for (var i = 0; i < directions.length; i++) {
+        var offset = baseOffset * directions[i];
+        var valid = true;
+        
+        // Check if this offset would conflict with any overlaps
+        for (var j = 0; j < overlaps.length; j++) {
+            var overlap = overlaps[j];
+            
+            if (isHorizontal) {
+                // For horizontal segments, check vertical positions
+                if (Math.abs(offset) === Math.abs(overlap.start.y - overlap.end.y)) {
+                    valid = false;
+                    break;
+                }
+            } else {
+                // For vertical segments, check horizontal positions
+                if (Math.abs(offset) === Math.abs(overlap.start.x - overlap.end.x)) {
+                    valid = false;
+                    break;
+                }
+            }
+        }
+        
+        if (valid) return offset;
+    }
+    
+    // If no perfect match found, return default offset
+    return baseOffset;
+}
+
+function applyConnectorUpdates(updatedConnectors) {
+    var count = 0;
+    
+    updatedConnectors.forEach(function(connector) {
+        // Delete existing waypoints
+        Repository.Execute(`DELETE FROM t_connectorwaypoint WHERE ConnectorID = ${connector.id}`);
+        
+        // Insert new waypoints
+        connector.waypoints.forEach(function(wp) {
+            var sql = `
+                INSERT INTO t_connectorwaypoint
+                (ConnectorID, Sequence, XPosition, YPosition, Waypoint)
+                VALUES (${connector.id}, ${wp.seq}, ${wp.x}, ${wp.y}, '${wp.type}')
+            `;
+            Repository.Execute(sql);
+        });
+        
+        count++;
+    });
+    
+    return count;
+}
+
+function parseXmlResult(xmlString) {
+    var xmlDoc = new ActiveXObject("MSXML2.DOMDocument.6.0");
+    xmlDoc.async = false;
+    xmlDoc.loadXML(xmlString);
+    return xmlDoc;
+}
+
+// Execute the script
+main();
