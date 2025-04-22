@@ -23,7 +23,7 @@ function main() {
         var queryResult = Repository.SQLQuery(sqlQuery);
         
         // Procesar el resultado XML
-        var xmlDoc = CreateObject("MSXML2.DOMDocument.6.0");
+        var xmlDoc = new COMObject("MSXML2.DOMDocument.4.0");
         xmlDoc.async = false;
         xmlDoc.loadXML(queryResult);
         
@@ -84,5 +84,6 @@ function main() {
 }
 
 main();
+
 
 
